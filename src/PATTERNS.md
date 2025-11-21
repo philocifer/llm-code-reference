@@ -8,14 +8,30 @@ Quick reference for common LangChain patterns and idioms.
 
 ```python
 import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+
+# Load environment variables
+load_dotenv()
 
 # Initialize LLM
 llm = ChatOpenAI(
     model="gpt-4o-mini",  # Fast and cheap
     temperature=0.0,       # Deterministic for production
     api_key=os.getenv("OPENAI_API_KEY")
+)
+```
+
+**Alternative: Local LLM with Ollama**
+
+```python
+from langchain_ollama import ChatOllama
+
+# For local models (requires Ollama installed)
+llm = ChatOllama(
+    model="llama3.2:3b",  # or other Ollama models
+    temperature=0.0,
 )
 ```
 
@@ -49,12 +65,14 @@ print(result.content)
 ## 📊 Pattern 2: Structured Output (with_structured_output)
 
 ```python
+from typing import Optional
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 # Define schema
 class OrderData(BaseModel):
     customer_name: str = Field(description="Full name")
+    email: Optional[str] = Field(description="Email address", default=None)
     product_name: str = Field(description="Product ordered")
     quantity: int = Field(description="Quantity", ge=1, le=100)
 
@@ -82,6 +100,31 @@ print(result.product_name)
 - ✅ No format instructions needed (cleaner prompts)
 - ✅ Better error handling
 - ✅ Faster and more accurate
+
+**Advanced: Custom Validators**
+
+```python
+from pydantic import BaseModel, Field, field_validator
+
+class OrderData(BaseModel):
+    customer_name: str = Field(description="Full name")
+    quantity: int = Field(description="Quantity", ge=1)
+    unit_price: float = Field(description="Price per unit")
+    
+    @field_validator('unit_price')
+    @classmethod
+    def validate_positive_price(cls, v):
+        if v <= 0:
+            raise ValueError('Price must be positive')
+        return v
+    
+    @field_validator('quantity')
+    @classmethod
+    def validate_quantity(cls, v):
+        if v > 1000:
+            raise ValueError('Quantity cannot exceed 1000')
+        return v
+```
 
 ---
 
@@ -221,6 +264,116 @@ Text: {text}"""
 chain = prompt | structured_llm
 result = chain.invoke({"text": input_text})
 ```
+
+**Enum vs Literal:**
+- Use `Enum` for reusable categories across your codebase
+- Use `Literal` for simple, one-off constrained strings:
+
+```python
+from typing import Literal
+
+class Analysis(BaseModel):
+    sentiment: Literal["positive", "neutral", "negative"]
+    priority: Literal["low", "medium", "high"]
+```
+
+---
+
+## 🤖 Pattern 6: LangGraph Agent with Tools
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import MessagesState
+
+# Define tools
+@tool
+def calculator(expression: str) -> str:
+    """Evaluates a mathematical expression."""
+    try:
+        result = eval(expression, {"__builtins__": {}}, {})
+        return f"Result: {result}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# Initialize LLM with tools
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+tools = [calculator]
+llm_with_tools = llm.bind_tools(tools)
+
+# Create tool execution mapping
+tools_by_name = {tool.name: tool for tool in tools}
+
+# Define agent node
+def call_agent(state: MessagesState) -> MessagesState:
+    """Call the agent with the current state"""
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+# Define tool execution node
+def tool_node(state: MessagesState) -> MessagesState:
+    """Execute tool calls"""
+    from langchain_core.messages import ToolMessage
+    
+    result = []
+    for tool_call in state["messages"][-1].tool_calls:
+        tool = tools_by_name[tool_call["name"]]
+        observation = tool.invoke(tool_call["args"])
+        result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
+    return {"messages": result}
+
+# Define routing
+def should_continue(state: MessagesState) -> str:
+    """Determine whether to continue or end"""
+    last_message = state["messages"][-1]
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        return "end"
+    return "continue"
+
+# Build graph
+workflow = StateGraph(MessagesState)
+workflow.add_node("agent", call_agent)
+workflow.add_node("tools", tool_node)
+workflow.set_entry_point("agent")
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+    {"continue": "tools", "end": END}
+)
+workflow.add_edge("tools", "agent")
+
+# Compile and run
+app = workflow.compile()
+
+# Use the agent
+system_prompt = "You are a helpful assistant with access to tools."
+user_input = "What is 25 * 4?"
+
+# Option 1: Get final result
+result = app.invoke({
+    "messages": [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_input)
+    ]
+})
+
+# Option 2: Stream intermediate results
+for event in app.stream({"messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_input)]}):
+    for key, value in event.items():
+        if key == "agent":
+            print(f"Agent: {value['messages'][-1].content}")
+        elif key == "tools":
+            print(f"Tool results: {value['messages'][-1].content}")
+```
+
+**Why use LangGraph:**
+- ✅ Full control over agent flow
+- ✅ Tool calling with iterative refinement
+- ✅ State management for complex workflows
+- ✅ Can stream intermediate results
+- ✅ More flexible than simple chains
 
 ---
 
@@ -404,10 +557,13 @@ Time: ~XX minutes
 """
 
 import os
+from dotenv import load_dotenv
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+
+load_dotenv()
 
 
 class OutputSchema(BaseModel):
@@ -454,31 +610,38 @@ def main():
 
 if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
-        print("⚠️  Set OPENAI_API_KEY")
+        print("⚠️  Please set OPENAI_API_KEY environment variable")
+        print("   export OPENAI_API_KEY='your-key-here'")
     else:
         main()
 ```
+
+**Note**: Always check for the API key before running to avoid cryptic errors.
 
 ---
 
 ## 🐛 Debug Tips
 
 ```python
-# Add this to see what's happening
+# Option 1: LangSmith tracing (recommended for production debugging)
+import os
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_API_KEY"] = "your-langsmith-key"
+os.environ["LANGCHAIN_PROJECT"] = "my-project"
+# Now all LLM calls will be traced in LangSmith
+
+# Option 2: Local debug mode
 import langchain
-langchain.debug = True  # Shows all LLM calls and prompts
+langchain.debug = True  # Shows all LLM calls and prompts in console
 
-# Or use verbose in chains
-chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=retriever,
-    verbose=True  # Shows chain steps
-)
-
-# Print intermediate results
+# Option 3: Print intermediate results
 result = step1(input)
 print(f"Step 1 output: {result}")  # Debug print
 result = step2(result)
+
+# Option 4: Suppress specific warnings
+import warnings
+warnings.filterwarnings("ignore", message=".*specific warning text.*")
 ```
 
 ---
