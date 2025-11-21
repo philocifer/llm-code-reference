@@ -95,12 +95,6 @@ print(result.customer_name)
 print(result.product_name)
 ```
 
-**Why this is better:**
-- ✅ Uses OpenAI's native structured output (more reliable)
-- ✅ No format instructions needed (cleaner prompts)
-- ✅ Better error handling
-- ✅ Faster and more accurate
-
 **Advanced: Custom Validators**
 
 ```python
@@ -189,12 +183,6 @@ print(answer)
 # Get source documents separately if needed
 source_docs = retriever.invoke("What are the requirements?")
 ```
-
-**Why this is better:**
-- ✅ Modern LCEL composition (future-proof)
-- ✅ More flexible and composable
-- ✅ Explicit control over each step
-- ✅ No deprecated chains
 
 ---
 
@@ -367,13 +355,6 @@ for event in app.stream({"messages": [SystemMessage(content=system_prompt), Huma
         elif key == "tools":
             print(f"Tool results: {value['messages'][-1].content}")
 ```
-
-**Why use LangGraph:**
-- ✅ Full control over agent flow
-- ✅ Tool calling with iterative refinement
-- ✅ State management for complex workflows
-- ✅ Can stream intermediate results
-- ✅ More flexible than simple chains
 
 ---
 
@@ -646,24 +627,348 @@ warnings.filterwarnings("ignore", message=".*specific warning text.*")
 
 ---
 
-## ⚡ Quick Development Tips
+## 🧪 Pattern 7: Pytest Testing for LangChain Applications
 
-**Efficient workflow:**
-1. Start with clear requirements
-2. Set up data models first (Pydantic)
-3. Build core functionality
-4. Add error handling
-5. Test with real examples
+```python
+"""
+Testing LangChain Applications with Pytest (Real API Calls)
+===========================================================
+Test LLM behavior with actual API calls for reliable, real-world validation.
 
----
+Key Patterns:
+- Fixtures for reusable test data and setup
+- Parametrized tests for multiple scenarios
+- Testing Pydantic validation
+- Real LLM calls to test actual behavior
+- Flexible assertions for LLM variability
+"""
 
-## 🎯 Best Practices
+import pytest
+from pydantic import ValidationError
+import os
 
-- ✅ Simple, clear code is better than complex code
-- ✅ Test incrementally as you build
-- ✅ Use logging/prints for debugging
-- ✅ Handle errors gracefully
-- ✅ Comment complex logic
-- ✅ Use type hints
-- ✅ Reference documentation when needed
 
+# ============================================================================
+# FIXTURES - Reusable Test Setup
+# ============================================================================
+
+@pytest.fixture
+def extractor():
+    """Create extractor instance"""
+    from your_module import YourExtractor
+    return YourExtractor()
+
+
+@pytest.fixture
+def sample_order():
+    """Sample test data"""
+    return """
+    Customer: John Smith
+    Email: john@email.com
+    Product: Widget
+    Quantity: 2
+    Price: $29.99
+    Ship to: 123 Main St, City, State
+    """
+
+
+@pytest.fixture
+def incomplete_order():
+    """Order with missing fields"""
+    return """
+    Customer: Jane Doe
+    Product: Gadget
+    Quantity: 1
+    Ship to: 456 Oak Ave, Town, State
+    """
+
+
+# ============================================================================
+# TESTING PYDANTIC MODELS - No API needed
+# ============================================================================
+
+class TestModelValidation:
+    """Test Pydantic model validation"""
+    
+    def test_valid_model_creation(self):
+        """Test creating a valid model"""
+        from your_module import YourModel
+        
+        model = YourModel(
+            field1="value1",
+            field2=42,
+            field3="required"
+        )
+        
+        assert model.field1 == "value1"
+        assert model.field2 == 42
+    
+    def test_validation_fails_on_invalid_data(self):
+        """Test that invalid data raises ValidationError"""
+        from your_module import YourModel
+        
+        with pytest.raises(ValidationError) as exc_info:
+            YourModel(
+                field1="value1",
+                field2=-1,  # Invalid (assume must be positive)
+                field3="required"
+            )
+        
+        assert "validation error" in str(exc_info.value).lower()
+    
+    @pytest.mark.parametrize("quantity,should_pass", [
+        (1, True),      # Minimum valid
+        (100, True),    # Normal
+        (1000, True),   # Maximum valid
+        (0, False),     # Too low
+        (1001, False),  # Too high
+    ])
+    def test_quantity_boundaries(self, quantity, should_pass):
+        """Test quantity validation boundaries"""
+        from your_module import YourModel
+        
+        if should_pass:
+            model = YourModel(quantity=quantity, field3="required")
+            assert model.quantity == quantity
+        else:
+            with pytest.raises(ValidationError):
+                YourModel(quantity=quantity, field3="required")
+
+
+# ============================================================================
+# REAL API TESTS - Test Actual LLM Behavior
+# ============================================================================
+
+class TestExtractor:
+    """Test extraction with real API calls"""
+    
+    def test_extract_complete_order(self, extractor, sample_order):
+        """Test extraction of complete order"""
+        result = extractor.extract(sample_order)
+        
+        # Assert on extracted fields with flexible matching
+        assert result.customer_name is not None
+        assert "smith" in result.customer_name.lower()
+        
+        assert result.email is not None
+        assert "@" in result.email
+        
+        assert result.product_name is not None
+        assert "widget" in result.product_name.lower()
+        
+        assert result.quantity == 2
+        
+        assert result.unit_price is not None
+        assert result.unit_price > 0
+        
+        assert result.shipping_address is not None
+        assert "123" in result.shipping_address
+    
+    def test_extract_incomplete_order(self, extractor, incomplete_order):
+        """Test extraction with missing optional fields"""
+        result = extractor.extract(incomplete_order)
+        
+        # Required fields should be present
+        assert result.customer_name is not None
+        assert result.product_name is not None
+        assert result.quantity >= 1
+        assert result.shipping_address is not None
+        
+        # Optional fields might be None (depends on LLM)
+        # Don't assert None - LLM might infer values
+    
+    def test_multiple_extractions_consistency(self, extractor):
+        """Test consistency with temperature=0"""
+        order = "Customer: Bob. Product: Laptop. Qty: 1. Ship to: 100 Main St."
+        
+        result1 = extractor.extract(order)
+        result2 = extractor.extract(order)
+        
+        # With temperature=0, key fields should match
+        assert result1.quantity == result2.quantity
+        assert result1.customer_name.lower() == result2.customer_name.lower()
+
+
+# ============================================================================
+# PARAMETRIZED TESTS - Test Multiple Scenarios
+# ============================================================================
+
+class TestMultipleScenarios:
+    """Test various input formats"""
+    
+    @pytest.mark.parametrize("order_text,expected_customer,expected_qty", [
+        (
+            "Order from Alice Smith for 3 keyboards. Ship to 123 Oak St.",
+            "smith",
+            3
+        ),
+        (
+            "Bob Johnson needs 5 mice sent to 456 Pine Ave.",
+            "johnson",
+            5
+        ),
+        (
+            "Sarah Lee\nProduct: Monitor\nQuantity: 1\nAddress: 789 Elm St",
+            "lee",
+            1
+        ),
+    ])
+    def test_various_formats(self, extractor, order_text, expected_customer, expected_qty):
+        """Test extraction from different format styles"""
+        result = extractor.extract(order_text)
+        
+        assert expected_customer in result.customer_name.lower()
+        assert result.quantity == expected_qty
+
+
+# ============================================================================
+# EDGE CASES
+# ============================================================================
+
+class TestEdgeCases:
+    """Test edge cases and error handling"""
+    
+    def test_minimal_input(self, extractor):
+        """Test with minimal information"""
+        minimal = "Customer: John. Product: Item. Qty: 1. Address: Street."
+        
+        result = extractor.extract(minimal)
+        
+        # Should extract at least the basics
+        assert result.customer_name is not None
+        assert result.product_name is not None
+        assert result.quantity >= 1
+    
+    def test_noisy_input(self, extractor):
+        """Test with extra irrelevant text"""
+        noisy = """
+        Hello! Hope you're well.
+        
+        I'd like to order:
+        Customer: Jane Doe
+        Product: Chair
+        Quantity: 2
+        Ship to: 100 Main St, City
+        
+        Thanks!
+        """
+        
+        result = extractor.extract(noisy)
+        
+        # Should extract correctly despite noise
+        assert "jane" in result.customer_name.lower() or "doe" in result.customer_name.lower()
+        assert result.quantity == 2
+    
+    def test_ambiguous_quantity(self, extractor):
+        """Test handling of ambiguous input"""
+        ambiguous = """
+        Customer: Bob Smith
+        Product: Desks
+        Quantity: a couple
+        Ship to: 200 Oak St
+        """
+        
+        result = extractor.extract(ambiguous)
+        
+        # LLM should interpret "a couple" as a number
+        assert result.quantity >= 1
+        assert result.quantity <= 10  # Reasonable interpretation
+
+
+# ============================================================================
+# SKIP TESTS IF NO API KEY
+# ============================================================================
+
+def pytest_collection_modifyitems(config, items):
+    """Skip API tests if no OPENAI_API_KEY"""
+    if not os.getenv("OPENAI_API_KEY"):
+        skip_api = pytest.mark.skip(reason="OPENAI_API_KEY not set")
+        for item in items:
+            # Skip tests that need API (not validation tests)
+            if "TestModelValidation" not in item.nodeid:
+                item.add_marker(skip_api)
+```
+
+**Running Tests:**
+
+```bash
+# Run all tests
+pytest tests/test_document_parser.py -v
+
+# Run only validation tests (no API needed)
+pytest tests/test_document_parser.py::TestModelValidation -v
+
+# Run tests matching a keyword
+pytest tests/ -k "validation" -v
+
+# Stop on first failure
+pytest tests/ -x
+
+# Show print statements
+pytest tests/ -s
+
+# Run specific test
+pytest tests/test_document_parser.py::TestExtractor::test_extract_complete_order -v
+```
+
+**Best Practices for Real API Testing:**
+
+1. **Use temperature=0** - Makes LLM responses deterministic for testing
+2. **Flexible assertions** - Use `in` checks and lower() for text matching
+3. **Test real behavior** - Validates actual LLM performance, not mocks
+4. **Fixtures for test data** - Reuse common test inputs
+5. **Parametrize similar tests** - Test multiple cases efficiently
+6. **Test validation separately** - No API needed for Pydantic validation
+7. **Reasonable ranges** - Allow small variance in numeric extractions
+8. **Skip without API key** - Auto-skip tests if credentials missing
+
+**Test File Structure:**
+
+```python
+tests/
+├── __init__.py
+├── conftest.py              # Shared fixtures and configuration
+├── test_document_parser.py  # Tests with real API calls
+└── test_text_classifier.py  # More tests
+```
+
+**Conftest.py Example:**
+
+```python
+"""Shared pytest configuration"""
+import pytest
+import os
+
+
+def pytest_configure(config):
+    """Register custom markers"""
+    config.addinivalue_line(
+        "markers",
+        "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+    )
+
+
+@pytest.fixture
+def sample_texts():
+    """Common test data"""
+    return [
+        "Sample text 1",
+        "Sample text 2",
+        "Edge case text"
+    ]
+```
+
+**Why Real API Tests:**
+
+✅ **Test actual behavior** - Validates what users experience  
+✅ **Catch prompt issues** - Detects when prompts don't work  
+✅ **Simpler code** - No complex mocking  
+✅ **Find edge cases** - LLM surprises reveal real issues  
+✅ **Confidence** - Know your system actually works  
+
+**Cost Management:**
+
+- Tests are fast (temperature=0, small inputs)
+- ~$0.01-0.05 per full test run with gpt-4o-mini
+- Use shorter test inputs
+- Run targeted tests during development: `pytest -k "specific_test"`

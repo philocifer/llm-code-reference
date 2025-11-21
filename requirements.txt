@@ -24,5 +24,6 @@ numpy>=2.1.0,<3.0.0
 
 # Development/Testing (optional)
 pytest>=7.4.3,<9.0.0
+pytest-xdist>=3.3.0,<4.0.0  # Parallel test execution
 black>=23.12.1,<25.0.0
 
